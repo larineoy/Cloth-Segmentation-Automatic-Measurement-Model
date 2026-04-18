@@ -1,0 +1,45 @@
+data:
+  root: "data"               # top-level folder containing Train/ and Test/
+  img_size: 256
+  num_classes: 7
+  num_workers: 0
+  batch_size: 2
+
+  # Folder names inside data/ (must match exactly — case-sensitive)
+  train_split: "Train"
+  test_split:  "Test"
+
+  # Class index → name mapping
+  classes:
+    0: background
+    1: top
+    2: bottom
+    3: dress
+    4: skin
+    5: hair
+    6: shoes
+
+  # RGB color per class for visualization
+  palette:
+    0: [75,  0,   130]
+    1: [70,  130, 180]
+    2: [64,  224, 208]
+    3: [255, 105, 180]
+    4: [255, 215,   0]
+    5: [34,  139,  34]
+    6: [173, 255,  47]
+
+model:
+  backbone: "efficientnet_b4"
+  pretrained: true
+
+training:
+  epochs: 50
+  freeze_encoder_epochs: 5
+  lr: 2e-4
+  weight_decay: 1e-4
+  amp: false
+
+inference:
+  checkpoint: "checkpoints/best.pth"
+  output_dir: "outputs/"
