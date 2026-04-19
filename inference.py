@@ -59,41 +59,40 @@ IMG_SIZE    = 512   # must match training img_size
 
 def _build_model(num_classes: int, checkpoint_path: str, device: torch.device):
     """
-    Load model architecture and restore weights from checkpoint.
+    Builds ClothSegModel (EfficientNet-B4 encoder + UNet decoder) and loads
+    weights from best.pth.
 
-    Edit this function to match whatever architecture you trained.
-    The checkpoint is expected to contain either:
-      - a raw state_dict, or
-      - a dict with a "model_state_dict" / "state_dict" key.
+    Checkpoint format saved by Trainer._save():
+        { "epoch": int, "model": state_dict, "optimizer": ..., "best_miou": float }
     """
-    # ---- Replace this block with your actual model ----
-    # Example: torchvision DeepLabV3+ with ResNet-50 backbone
-    try:
-        from torchvision.models.segmentation import deeplabv3_resnet50
-        model = deeplabv3_resnet50(num_classes=num_classes, weights=None)
-    except Exception as e:
-        raise ImportError(
-            "Could not build the default model (DeepLabV3-ResNet50). "
-            "Edit _build_model() in inference.py to match your architecture."
-        ) from e
-    # ---------------------------------------------------
+    import sys, pathlib
+    # Make sure the project root is on the path so model/ can be imported
+    _root = pathlib.Path(__file__).resolve().parent
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+
+    from model.segmodel import ClothSegModel
+
+    model = ClothSegModel(
+        num_classes=num_classes,
+        backbone="efficientnet_b4",
+        pretrained=False,   # weights come from checkpoint, not HuggingFace
+    )
 
     ckpt = torch.load(checkpoint_path, map_location=device)
 
-    # Handle various checkpoint formats
-    if isinstance(ckpt, dict):
-        sd = (
-            ckpt.get("model_state_dict")
-            or ckpt.get("state_dict")
-            or ckpt.get("model")
-            or ckpt          # assume the whole dict is the state_dict
-        )
+    # Trainer always saves the state_dict under the key "model"
+    if isinstance(ckpt, dict) and "model" in ckpt:
+        state_dict = ckpt["model"]
+        print(f"[inference] Loaded checkpoint: {checkpoint_path} "
+              f"(epoch={ckpt.get('epoch','?')}, best_mIoU={ckpt.get('best_miou','?')})")
     else:
-        sd = ckpt
+        # Fallback: checkpoint is the raw state_dict itself
+        state_dict = ckpt
+        print(f"[inference] Loaded checkpoint: {checkpoint_path}")
 
-    model.load_state_dict(sd, strict=False)
+    model.load_state_dict(state_dict, strict=True)
     model.to(device).eval()
-    print(f"[inference] Loaded checkpoint: {checkpoint_path}")
     return model
 
 
@@ -139,11 +138,8 @@ def segment(
     x = x.to(device)
     out = model(x)
 
-    # Support both plain tensor output and torchvision dict output
-    if isinstance(out, dict):
-        logits = out["out"]          # torchvision segmentation models
-    else:
-        logits = out                 # plain (B, C, H, W)
+    # ClothSegModel returns a plain (B, C, H, W) tensor directly
+    logits = out["out"] if isinstance(out, dict) else out
 
     # Upsample back to original resolution
     logits = F.interpolate(logits, size=orig_hw, mode="bilinear", align_corners=False)
