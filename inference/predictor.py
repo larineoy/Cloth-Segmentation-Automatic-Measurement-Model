@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from data.transforms  import get_inference_transforms
+from preprocessing.transforms import get_inference_transforms
 from model.segmodel   import ClothSegModel
 
 
