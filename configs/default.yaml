@@ -3,13 +3,14 @@ data:
   img_size: 256
   num_classes: 7
   num_workers: 0
-  batch_size: 2
+  # Use 4+ on GPU if memory allows; reduce on CPU if OOM
+  batch_size: 4
 
   # Folder names inside data/ (must match exactly — case-sensitive)
   train_split: "Train"
   test_split:  "Test"
 
-  # Class index → name mapping
+  # Class index → name (align with rows in `palette` for RGB masks)
   classes:
     0: background
     1: top
@@ -19,15 +20,42 @@ data:
     5: hair
     6: shoes
 
-  # RGB color per class for visualization
+  # auto: RGB/RGBA Segmented PNGs -> nearest RGB in `palette`; indexed (P/L) -> options below
+  mask_encoding: auto
+
+  # Which folders to train on: primary (Image/Segmented), secondary (Image2/Segmented2), or both.
+  # Default is ``both`` if ``data2`` is set, else ``primary``. Val/test follow the same layout as train when using one source.
+  sources: secondary
+
+  # For honest validation, add Test/Image2 + Test/Segmented2. If missing, training falls back to using Train for the val loader (see dataset warning).
+  # Required when sources is ``secondary`` or ``both``: merged with top-level ``data`` (palette, void, etc. can be overridden here).
+  data2:
+    root: "data"
+
+  # RGB masks: exact match -> ignore in loss (must match training ignore_index)
+  void_mask_rgb: [255, 255, 255]
+
+  # Indexed masks only (ignored for RGB):
+  label_id_offset: null
+  label_palette_span: null
+  raw_class_values: null
+  extra_raw_class_map: null
+
+  # RGB nearest-neighbor: distance in sRGB or CIE Lab (``lab`` is usually better for label colors).
+  rgb_distance: lab
+  # Optional: squared Lab distance above which a pixel is treated as void (anti-aliasing). null = off.
+  rgb_void_far_sqdist: null
+
+  # Anchor colors for RGB masks: each pixel -> nearest class (L2 in RGB or Lab — see rgb_distance).
+  # Tuned to dominant colors in sample masks; reorder rows + `classes` if your tool differs.
   palette:
-    0: [75,  0,   130]
-    1: [70,  130, 180]
-    2: [64,  224, 208]
-    3: [255, 105, 180]
-    4: [255, 215,   0]
-    5: [34,  139,  34]
-    6: [173, 255,  47]
+    0: [68,   1,  84]
+    1: [56,  86, 139]
+    2: [41, 120, 142]
+    3: [70,  47, 124]
+    4: [253, 231,  36]
+    5: [83, 197, 103]
+    6: [165, 218,  53]
 
 model:
   backbone: "efficientnet_b4"
@@ -35,10 +63,21 @@ model:
 
 training:
   epochs: 50
+  # 0 = train full model from the start; >0 freezes encoder-only for that many epochs (smaller val sets are noisier after unfreeze)
   freeze_encoder_epochs: 5
-  lr: 2e-4
-  weight_decay: 1e-4
+  # Use e.g. 2.0e-4 — plain 2e-4 is read as a string by PyYAML
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+  # true on CUDA speeds training and often stabilizes BN; keep false on CPU
   amp: false
+  # Common mask value for void/boundaries (not in 0..num_classes-1); set null to disable
+  ignore_index: 255
+  # Stop if val mIoU does not improve for this many epochs (set null or 0 to disable)
+  early_stopping_patience: 10
+  # Required mIoU gain over the best-so-far to count as an improvement
+  early_stopping_min_delta: 0.0
+  # Cross-entropy class weights: null (uniform), ``auto`` (inverse freq from Train pixels), or explicit list
+  class_weights: auto
 
 inference:
   checkpoint: "checkpoints/best.pth"

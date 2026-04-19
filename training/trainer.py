@@ -27,18 +27,44 @@ class Trainer:
         self.model        = model.to(device)
         self.train_loader = train_loader
         self.val_loader   = val_loader
-        self.cfg          = cfg
+        _ig = cfg.get("ignore_index", 255)
+        _esp = cfg.get("early_stopping_patience")
+        if _esp is not None:
+            _esp = int(_esp)
+        self.cfg          = {
+            **cfg,
+            "lr": float(cfg["lr"]),
+            "weight_decay": float(cfg["weight_decay"]),
+            "epochs": int(cfg["epochs"]),
+            "freeze_encoder_epochs": int(cfg.get("freeze_encoder_epochs", 5)),
+            "num_classes": int(cfg["num_classes"]),
+            "amp": bool(cfg["amp"]),
+            "ignore_index": None if _ig is None else int(_ig),
+            "early_stopping_patience": _esp,
+            "early_stopping_min_delta": float(cfg.get("early_stopping_min_delta", 0.0)),
+        }
         self.device       = device
 
-        self.criterion = SegLoss(num_classes=cfg["num_classes"])
+        c = self.cfg
+        _cw = c.get("ce_class_weights")
+        _cw_t = None
+        if _cw is not None:
+            _cw_t = _cw if isinstance(_cw, torch.Tensor) else torch.tensor(_cw, dtype=torch.float32)
+        self.criterion = SegLoss(
+            num_classes=c["num_classes"],
+            ignore_index=c["ignore_index"],
+            class_weights=_cw_t,
+        ).to(device)
         self.optimizer = torch.optim.AdamW(
-            model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"]
+            model.parameters(), lr=c["lr"], weight_decay=c["weight_decay"]
         )
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=cfg["epochs"]
+            self.optimizer, T_max=c["epochs"]
         )
-        self.scaler    = torch.cuda.amp.GradScaler(enabled=(cfg["amp"] and device == "cuda"))
-        self.best_miou = 0.0
+        self.scaler    = torch.amp.GradScaler(
+            "cuda", enabled=(c["amp"] and device == "cuda")
+        )
+        self.best_miou = None  # type: float | None
         os.makedirs("checkpoints", exist_ok=True)
 
     def _train_epoch(self) -> float:
@@ -69,8 +95,10 @@ class Trainer:
                 loss   = self.criterion(logits, masks)
             preds = logits.argmax(dim=1)
             total_loss += loss.item()
-            total_miou += compute_miou(preds, masks, self.cfg["num_classes"])
-            total_acc  += compute_pixel_acc(preds, masks)
+            total_miou += compute_miou(
+                preds, masks, self.cfg["num_classes"], self.cfg["ignore_index"]
+            )
+            total_acc += compute_pixel_acc(preds, masks, self.cfg["ignore_index"])
         n = len(self.val_loader)
         return total_loss / n, total_miou / n, total_acc / n
 
@@ -87,9 +115,18 @@ class Trainer:
     def run(self):
         epochs              = self.cfg["epochs"]
         freeze_until        = self.cfg.get("freeze_encoder_epochs", 5)
+        es_patience         = self.cfg.get("early_stopping_patience")
+        es_delta            = self.cfg["early_stopping_min_delta"]
+        es_enabled          = es_patience is not None and es_patience > 0
+        stall               = 0
 
         print(f"Starting training for {epochs} epochs on {self.device}")
         print(f"Encoder frozen for first {freeze_until} epochs")
+        if es_enabled:
+            print(
+                f"Early stopping: patience={es_patience} epochs "
+                f"(val mIoU, min_delta={es_delta})"
+            )
         self.model.freeze_encoder()
 
         for epoch in range(1, epochs + 1):
@@ -110,13 +147,27 @@ class Trainer:
                 f"acc={val_acc:.4f}"
             )
 
+            best = self.best_miou
+            improved = best is None or val_miou > best + es_delta
+
             # Save best checkpoint
-            if val_miou > self.best_miou:
+            if improved:
                 self.best_miou = val_miou
                 path = self._save(epoch, val_miou, tag="best")
                 print(f"  ↑ New best mIoU={val_miou:.4f}  saved → {path}")
+                stall = 0
+            elif es_enabled:
+                stall += 1
 
             # Always save latest
             self._save(epoch, val_miou, tag="latest")
 
-        print(f"\nTraining complete. Best mIoU: {self.best_miou:.4f}")
+            if es_enabled and stall >= es_patience:
+                print(
+                    f"\nEarly stopping at epoch {epoch}: "
+                    f"val mIoU did not improve by more than {es_delta} for {es_patience} epochs."
+                )
+                break
+
+        best_miou = self.best_miou if self.best_miou is not None else float("nan")
+        print(f"\nTraining complete. Best mIoU: {best_miou:.4f}")
